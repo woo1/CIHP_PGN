@@ -15,11 +15,18 @@ tf.disable_v2_behavior()
 import numpy as np
 from PIL import Image
 from utils import *
+import argparse
+
+parser = argparse.ArgumentParser(description='Argparse Tutorial')
+parser.add_argument('--dataset', type=str,
+                    help='dataset name')
+args = parser.parse_args()
 
 N_CLASSES = 20
-DATA_DIR = './datasets/CIHP'
-LIST_PATH = './datasets/CIHP/list/val.txt'
-DATA_ID_LIST = './datasets/CIHP/list/val_id.txt'
+dataset = args.dataset
+DATA_DIR = './datasets/'+dataset
+LIST_PATH = './datasets/'+dataset+'/list/val.txt'
+DATA_ID_LIST = './datasets/'+dataset+'/list/val_id.txt'
 with open(DATA_ID_LIST, 'r') as f:
     NUM_STEPS = len(f.readlines()) 
 RESTORE_FROM = './checkpoint/CIHP_pgn'
@@ -31,15 +38,12 @@ def main():
     coord = tf.train.Coordinator()
     # Load reader.
     with tf.name_scope("create_inputs"):
-        reader = ImageReader(DATA_DIR, LIST_PATH, DATA_ID_LIST, None, False, False, False, coord)
-        image, label, edge_gt = reader.image, reader.label, reader.edge
-        print('image', type(image), image.shape)
+        reader = ImageReaderInfer(DATA_DIR, LIST_PATH, DATA_ID_LIST, None, False, False, False, coord)
+        image = reader.image
         image_rev = tf.reverse(image, tf.stack([1]))
         image_list = reader.image_list
 
     image_batch = tf.stack([image, image_rev])
-    label_batch = tf.expand_dims(label, axis=0) # Add one batch dimension.
-    edge_gt_batch = tf.expand_dims(edge_gt, axis=0)
     h_orig, w_orig = tf.to_float(tf.shape(image_batch)[1]), tf.to_float(tf.shape(image_batch)[2])
     image_batch050 = tf.image.resize_images(image_batch, tf.stack([tf.to_int32(tf.multiply(h_orig, 0.50)), tf.to_int32(tf.multiply(w_orig, 0.50))]))
     image_batch075 = tf.image.resize_images(image_batch, tf.stack([tf.to_int32(tf.multiply(h_orig, 0.75)), tf.to_int32(tf.multiply(w_orig, 0.75))]))
@@ -133,24 +137,6 @@ def main():
     raw_edge_all = tf.reduce_mean(tf.stack([head_output, tail_output_rev]), axis=0)
     raw_edge_all = tf.expand_dims(raw_edge_all, axis=0)
     pred_edge = tf.sigmoid(raw_edge_all)
-    res_edge = tf.cast(tf.greater(pred_edge, 0.5), tf.int32)
-
-    # prepare ground truth 
-    preds = tf.reshape(pred_all, [-1,])
-    gt = tf.reshape(label_batch, [-1,])
-    weights = tf.cast(tf.less_equal(gt, N_CLASSES - 1), tf.int32) # Ignoring all labels greater than or equal to n_classes.
-    # mIoU, update_op_iou = tf.contrib.metrics.streaming_mean_iou(preds, gt, num_classes=N_CLASSES, weights=weights)
-    mIoU, update_op_iou = tf.metrics.mean_iou(preds, gt, num_classes=N_CLASSES, weights=weights)
-    # macc, update_op_acc = tf.contrib.metrics.streaming_accuracy(preds, gt, weights=weights)
-    macc, update_op_acc = tf.metrics.accuracy(preds, gt, weights=weights)
-
-    # precision and recall
-    # recall, update_op_recall = tf.contrib.metrics.streaming_recall(res_edge, edge_gt_batch)
-    recall, update_op_recall = tf.metrics.recall(res_edge, edge_gt_batch)
-    # precision, update_op_precision = tf.contrib.metrics.streaming_precision(res_edge, edge_gt_batch)
-    precision, update_op_precision = tf.metrics.precision(res_edge, edge_gt_batch)
-
-    update_op = tf.group(update_op_iou, update_op_acc, update_op_recall, update_op_precision)
 
     # Which variables to load.
     restore_var = tf.global_variables()
@@ -175,15 +161,15 @@ def main():
     threads = tf.train.start_queue_runners(coord=coord, sess=sess)
 
     # evaluate prosessing
-    parsing_dir = './output/cihp_parsing_maps'
+    parsing_dir = './output/cihp_parsing_maps/'+dataset
     if not os.path.exists(parsing_dir):
         os.makedirs(parsing_dir)
-    edge_dir = './output/cihp_edge_maps'
+    edge_dir = './output/cihp_edge_maps/'+dataset
     if not os.path.exists(edge_dir):
         os.makedirs(edge_dir)
     # Iterate over training steps.
     for step in range(NUM_STEPS):
-        parsing_, scores, edge_, _ = sess.run([pred_all, pred_scores, pred_edge, update_op])
+        parsing_, scores, edge_ = sess.run([pred_all, pred_scores, pred_edge])
         if step % 100 == 0:
             print('step {:d}'.format(step))
             print (image_list[step])
@@ -198,18 +184,8 @@ def main():
         
         cv2.imwrite('{}/{}.png'.format(edge_dir, img_id), edge_[0,:,:,0] * 255)
 
-    res_mIou = mIoU.eval(session=sess)
-    res_macc = macc.eval(session=sess)
-    res_recall = recall.eval(session=sess)
-    res_precision = precision.eval(session=sess)
-    f1 = 2 * res_precision * res_recall / (res_precision + res_recall)
-    print('Mean IoU: {:.4f}, Mean Acc: {:.4f}'.format(res_mIou, res_macc))
-    print('Recall: {:.4f}, Precision: {:.4f}, F1 score: {:.4f}'.format(res_recall, res_precision, f1))
-
     coord.request_stop()
     coord.join(threads)
-    
-
 
 if __name__ == '__main__':
     main()
